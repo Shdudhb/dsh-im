@@ -129,6 +129,7 @@ function runtimeFor(t, {
   let socket;
   const api = {
     getCurrentUser: async () => ({ id: BOT_ID, bot: true }),
+    getCurrentApplication: async () => ({ id: BOT_ID }),
     getGatewayBot: async () => ({ url: 'wss://gateway.discord.gg' }),
     getChannel: async ({ channelId }) => ({ id: channelId, type: 0 }),
     sendTyping: async () => {},
@@ -346,7 +347,7 @@ test('Discord runtime registers the command menu before connecting and skips an 
   assert.equal(calls.list.length, 1);
   assert.equal(calls.set.length, 1);
   assert.deepEqual(calls.set[0].commands, normalizeDiscordCommandTable(discordCommandDefinitions()));
-  assert.equal(calls.set[0].applicationId, '@me');
+  assert.equal(calls.set[0].applicationId, BOT_ID);
 
   // A second runtime over the same registered table performs no PUT.
   const second = runtimeFor(t);

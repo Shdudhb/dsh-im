@@ -199,11 +199,14 @@ export function normalizeDiscordCommandTable(value) {
 /**
  * Register the command table, PUTting only when the live table differs. Discord
  * replaces the whole table in one request, so there is no per-command diffing.
+ *
+ * `applicationId` is required: the registration endpoint is documented only
+ * against a real application id, not the `@me` alias.
  */
 export async function syncDiscordCommands({
   api,
   commands,
-  applicationId = '@me',
+  applicationId,
   guildId,
   signal,
 } = {}) {

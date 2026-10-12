@@ -191,6 +191,95 @@ test('Discord API gets a channel and starts one thread from a source message', a
   assert.equal(requests.length, 2);
 });
 
+test('Discord API acknowledges and completes an interaction through the webhook', async () => {
+  const requests = [];
+  const api = new DiscordApi({
+    token: TOKEN,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return jsonResponse({ id: '1' });
+    },
+  });
+  const interactionId = '111111111111111112';
+  const interactionToken = 'interaction-token-abcdefghijklmnop';
+
+  await api.createInteractionResponse({
+    interactionId,
+    interactionToken,
+    body: { type: 5 },
+  });
+  await api.editInteractionResponse({
+    applicationId: '1234567890123456789',
+    interactionToken,
+    body: { content: 'done' },
+  });
+
+  // A method parameter named like the validator must not shadow it: if it did,
+  // this would throw a TypeError instead of issuing the request.
+  assert.equal(
+    requests[0].url.pathname,
+    `/api/v10/interactions/${interactionId}/${interactionToken}/callback`,
+  );
+  assert.equal(requests[0].options.method, 'POST');
+  assert.deepEqual(JSON.parse(requests[0].options.body), { type: 5 });
+  // The initial interaction response is addressed as `@original`; `@me` is the
+  // endpoint for the current user, not for a webhook message.
+  assert.equal(
+    requests[1].url.pathname,
+    `/api/v10/webhooks/1234567890123456789/${interactionToken}/messages/@original`,
+  );
+  assert.equal(requests[1].options.method, 'PATCH');
+  assert.deepEqual(JSON.parse(requests[1].options.body), { content: 'done' });
+});
+
+test('Discord API rejects a malformed interaction token before issuing a request', async () => {
+  let calls = 0;
+  const api = new DiscordApi({
+    token: TOKEN,
+    fetchImpl: async () => {
+      calls += 1;
+      return new Response(null, { status: 204 });
+    },
+  });
+  // Validation happens before the request is built, so the call throws
+  // synchronously rather than rejecting.
+  assert.throws(
+    () => api.createInteractionResponse({
+      interactionId: '111111111111111112',
+      interactionToken: 'short',
+      body: { type: 5 },
+    }),
+    /Invalid Discord interaction token/u,
+  );
+  assert.equal(calls, 0);
+});
+
+test('Discord API registers application commands against a real application id', async () => {
+  const requests = [];
+  const api = new DiscordApi({
+    token: TOKEN,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return jsonResponse(options.method === 'GET' ? [] : [{ id: '1', name: 'new' }]);
+    },
+  });
+  const applicationId = '1234567890123456789';
+
+  await api.listApplicationCommands({ applicationId });
+  await api.setApplicationCommands({ applicationId, commands: [{ name: 'new', description: 'x' }] });
+
+  assert.equal(requests[0].url.pathname, `/api/v10/applications/${applicationId}/commands`);
+  assert.equal(requests[0].options.method, 'GET');
+  assert.equal(requests[1].options.method, 'PUT');
+  assert.deepEqual(JSON.parse(requests[1].options.body), [{ name: 'new', description: 'x' }]);
+  // The registration endpoint is documented against a real application id, so
+  // the undocumented `@me` alias must be refused rather than sent.
+  assert.throws(
+    () => api.listApplicationCommands({ applicationId: '@me' }),
+    /Invalid Discord application id/u,
+  );
+});
+
 test('Discord API adds and removes the current bot reaction with an encoded emoji', async () => {
   const requests = [];
   const api = new DiscordApi({

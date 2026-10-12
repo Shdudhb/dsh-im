@@ -630,6 +630,7 @@ export class DiscordRuntime {
   #channels = new Map();
   #routing = new Map();
   #commandCatalog;
+  #applicationId = null;
   #connecting = false;
   #commandMenuDirty = false;
 
@@ -710,13 +711,36 @@ export class DiscordRuntime {
   }
 
   /**
+   * Resolve the application id used for command registration. `applications/@me`
+   * is the documented source and is preferred; the bot user id is the fallback
+   * for partial API stubs and for tokens whose application id is not exposed.
+   */
+  async #resolveApplicationId(api, bot, signal) {
+    if (typeof api.getCurrentApplication === 'function') {
+      try {
+        const application = await api.getCurrentApplication({ signal });
+        const resolved = String(application?.id ?? '');
+        if (/^\d{5,30}$/.test(resolved)) return resolved;
+      } catch (error) {
+        this.#logger.warn?.(`[dsh-im:discord] bot ${this.#config.botId} could not read the application id:`, extractConnectionEvidence(error).details);
+      }
+    }
+    return String(bot?.id ?? this.#config.platformId ?? '');
+  }
+
+  /**
    * Push the shared command catalog to Discord as global application commands.
    * The call is idempotent: Discord replaces the whole table in one PUT and the
    * registry skips the request when the registered table already matches.
    */
   async #sendCommandMenu(api, signal) {
     const commands = discordCommandDefinitions(this.#commandCatalog);
-    return syncDiscordCommands({ api, commands, signal });
+    return syncDiscordCommands({
+      api,
+      commands,
+      applicationId: this.#applicationId,
+      signal,
+    });
   }
 
   /**
@@ -778,6 +802,11 @@ export class DiscordRuntime {
       if (String(bot?.id ?? '') !== this.#config.platformId || bot?.bot !== true) {
         throw new Error('Discord token identity does not match the saved bot');
       }
+      // Command registration is documented against a real application id.
+      // `applications/@me` is the documented source; for a bot application its
+      // id equals the bot user id, which is the fallback when the endpoint is
+      // unavailable on a partial API stub.
+      this.#applicationId = await this.#resolveApplicationId(api, bot, controller.signal);
       this.#gatewayUrl = gateway?.url;
       try {
         await this.#sendCommandMenu(api, controller.signal);
@@ -1218,6 +1247,7 @@ export class DiscordRuntime {
     this.#bridge = null;
     this.#client = null;
     this.#api = null;
+    this.#applicationId = null;
     this.#routing.clear();
     this.#connecting = false;
     this.#commandMenuDirty = false;

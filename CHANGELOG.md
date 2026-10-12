@@ -6,6 +6,16 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ## [Unreleased]
 
+### Added / 新增
+
+- Discord 机器人支持原生斜线指令：登录后自动把共享指令目录注册为全局应用指令，并随 Host 语言切换同步刷新。指令输入经 Interaction 回调在 3 秒内确认，回复沿用既有文本指令语义（参数、权限与 Session 绑定完全一致），未新增或改动任何指令行为。
+  Discord bots support native slash commands: the shared command catalog is registered as global application commands on connect and refreshed when the Host language changes. Interactions are acknowledged within Discord's three-second deadline and answered with the existing text-command semantics (arguments, permissions, and Session binding unchanged).
+
+### Fixed / 修复
+
+- 修正 Discord 应用指令的注册与回调端点：指令注册改用 `applications/@me` 解析出的真实 Application ID，Interaction 回复改用官方文档的 `webhooks/{application_id}/{token}/messages/@original`，并修正 interaction token 校验函数被同名参数遮蔽导致的 TypeError。以上问题会使斜线指令在注册或回复阶段失败。
+  Correct the Discord application-command registration and callback endpoints: registration now uses the real Application ID resolved from `applications/@me`, interaction replies use the documented `webhooks/{application_id}/{token}/messages/@original`, and the interaction token validator no longer throws a TypeError from being shadowed by a same-named parameter. These defects broke slash commands during registration or reply.
+
 ## [4.38.1] - 2026-10-12
 
 ### Fixed / 修复

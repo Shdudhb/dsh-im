@@ -88,10 +88,12 @@ function snowflake(value, name) {
   return id;
 }
 
-// Application command registration accepts the literal `@me` application id,
-// which is how the runtime registers without storing an application id.
+// Application command registration is documented only against a real
+// application id; `@me` is not a documented alias for this endpoint. Callers
+// resolve the id from `applications/@me` (for a bot application it equals the
+// bot user id).
 function applicationCommandsPath(applicationId, guildId) {
-  const application = applicationId === '@me' ? '@me' : snowflake(applicationId, 'application id');
+  const application = snowflake(applicationId, 'application id');
   const base = `applications/${application}/commands`;
   return guildId ? `applications/${application}/guilds/${snowflake(guildId, 'guild id')}/commands` : base;
 }
@@ -103,8 +105,10 @@ function reactionEmoji(value) {
 }
 
 // Interaction tokens are opaque, single-use webhook credentials. They are not
-// snowflakes, so they are validated by shape rather than by digits.
-function interactionToken(value) {
+// snowflakes, so they are validated by shape rather than by digits. Named
+// `validateInteractionToken` because the API methods take a parameter of the
+// same name, which would otherwise shadow this helper.
+function validateInteractionToken(value) {
   const token = cleanString(value);
   if (!token || !/^[A-Za-z0-9._-]{10,200}$/.test(token)) {
     throw new TypeError('Invalid Discord interaction token');
@@ -149,9 +153,9 @@ export class DiscordApi {
     return this.#request('gateway/bot', { ...options, method: 'GET' });
   }
 
-  // `applications/@me` resolves to the bot's own application, so registration
-  // never has to know or store an application id.
-  listApplicationCommands({ applicationId = '@me', guildId, signal } = {}) {
+  // Registration targets the real application id resolved from
+  // `applications/@me`; the `@me` alias is not documented for this endpoint.
+  listApplicationCommands({ applicationId, guildId, signal } = {}) {
     return this.#request(applicationCommandsPath(applicationId, guildId), {
       method: 'GET',
       signal,
@@ -160,7 +164,7 @@ export class DiscordApi {
 
   // Discord replaces the whole table in one PUT: the request body is the
   // complete desired command list, so no per-command diffing is needed.
-  setApplicationCommands({ applicationId = '@me', guildId, commands, signal } = {}) {
+  setApplicationCommands({ applicationId, guildId, commands, signal } = {}) {
     if (!Array.isArray(commands)) throw new TypeError('Discord commands must be an array');
     return this.#request(applicationCommandsPath(applicationId, guildId), {
       method: 'PUT',
@@ -169,7 +173,7 @@ export class DiscordApi {
     });
   }
 
-  deleteApplicationCommand({ applicationId = '@me', guildId, commandId, signal } = {}) {
+  deleteApplicationCommand({ applicationId, guildId, commandId, signal } = {}) {
     return this.#request(
       `${applicationCommandsPath(applicationId, guildId)}/${snowflake(commandId, 'command id')}`,
       { method: 'DELETE', signal, expectBody: false },
@@ -181,16 +185,17 @@ export class DiscordApi {
   // Gateway reply, and Discord never retries it.
   createInteractionResponse({ interactionId, interactionToken, body, signal } = {}) {
     return this.#request(
-      `interactions/${snowflake(interactionId, 'interaction id')}/${interactionToken(interactionToken)}/callback`,
+      `interactions/${snowflake(interactionId, 'interaction id')}/${validateInteractionToken(interactionToken)}/callback`,
       { method: 'POST', signal, body, expectBody: false, retry: false, timeoutMs: 5_000 },
     );
   }
 
   // Deferred interaction responses are completed through the application
-  // webhook rather than the channel message endpoint.
+  // webhook rather than the channel message endpoint. `@original` addresses the
+  // initial interaction response, which is what a deferred ACK created.
   editInteractionResponse({ applicationId, interactionToken, body, signal } = {}) {
     return this.#request(
-      `webhooks/${snowflake(applicationId, 'application id')}/${interactionToken(interactionToken)}/messages/@me`,
+      `webhooks/${snowflake(applicationId, 'application id')}/${validateInteractionToken(interactionToken)}/messages/@original`,
       { method: 'PATCH', signal, body, retry: false },
     );
   }
