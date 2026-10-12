@@ -7,10 +7,15 @@ import { fetchImageBuffer } from '../shared/image-prompt.mjs';
 import { t } from '../shared/i18n.mjs';
 import { captureContextEnhancement } from '../shared/context-enhancement.mjs';
 import { evaluateInboundAccess } from '../shared/inbound-access.mjs';
+import { SHARED_COMMAND_CATALOG } from '../shared/command-catalog.mjs';
 import { DiscordApi } from './discord-api.mjs';
 import { createDiscordBridgeStatus, DiscordHarnessBridge } from './discord-bridge.mjs';
+import { discordCommandDefinitions, discordCommandText, syncDiscordCommands, DISCORD_APPLICATION_COMMAND_INTERACTION_TYPE, DISCORD_PING_INTERACTION_TYPE } from './discord-command-registry.mjs';
 
 const DISCORD_GATEWAY_INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
+// DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: acknowledges an interaction without
+// content, giving us the ~15 minute window to answer through the webhook.
+const DISCORD_DEFERRED_CHANNEL_MESSAGE_TYPE = 5;
 const THREAD_RECOVERY_TIMEOUT_MS = 5_000;
 const RECONNECT_DELAYS_MS = Object.freeze([1_000, 3_000, 5_000, 10_000, 30_000]);
 const GUILD_TEXT = 0;
@@ -424,10 +429,23 @@ export class DiscordBotClient {
   #api;
   #signal;
   #deliveredNotices = new WeakSet();
+  #interactions = new WeakMap();
 
   constructor({ api, signal }) {
     this.#api = api;
     this.#signal = signal;
+  }
+
+  /**
+   * Bind a deferred interaction response to a reply target. Deliveries for that
+   * target then complete the deferred response instead of posting a new channel
+   * message, which is how native slash-command output reaches the invoker while
+   * the shared bridge keeps passing plain reply targets.
+   */
+  attachInteraction(target, interaction) {
+    if (!target || typeof target !== 'object' || !interaction) return target;
+    this.#interactions.set(target, interaction);
+    return target;
   }
 
   sendText(target, text) {
@@ -444,7 +462,15 @@ export class DiscordBotClient {
       ? String(target.notice) : null;
     const chunks = (markdown ? chunkMarkdownText : splitMessageText)(notice ? `${notice}\n\n${text}` : text, 1_900);
     const providerMessageIds = [];
+    const interaction = this.#pendingInteraction(target);
     for (const [index, chunk] of chunks.entries()) {
+      if (interaction && index === 0) {
+        // The deferred response replaces the first message; longer replies
+        // continue as ordinary messages in the same channel.
+        await this.#completeInteraction(interaction, chunk);
+        if (notice) this.#deliveredNotices.add(target);
+        continue;
+      }
       const result = await this.#api.createMessage({
         channelId: target.channelId,
         content: chunk,
@@ -492,9 +518,17 @@ export class DiscordBotClient {
     const notice = !this.#deliveredNotices.has(target) && target?.notice
       ? String(target.notice) : null;
     const decorate = (content) => notice ? `${notice}\n\n${content}` : content;
+    const interaction = this.#pendingInteraction(target);
     const stream = createEditableMessageStream({
       limit: notice ? 1_800 : 1_900,
       create: async (content) => {
+        if (interaction) {
+          // The deferred response IS the streaming message: the placeholder
+          // shown to the invoker is completed with the first chunk.
+          if (notice) this.#deliveredNotices.add(target);
+          await this.#completeInteraction(interaction, decorate(content));
+          return interaction.id;
+        }
         const message = await this.#api.createMessage({
           channelId: target.channelId,
           content: decorate(content),
@@ -504,12 +538,14 @@ export class DiscordBotClient {
         if (notice) this.#deliveredNotices.add(target);
         return message.id;
       },
-      edit: (messageId, content) => this.#api.editMessage({
-        channelId: target.channelId,
-        messageId,
-        content: decorate(content),
-        signal: this.#signal,
-      }),
+      edit: (messageId, content) => interaction
+        ? this.#completeInteraction(interaction, decorate(content))
+        : this.#api.editMessage({
+          channelId: target.channelId,
+          messageId,
+          content: decorate(content),
+          signal: this.#signal,
+        }),
       sendRemainder: (content) => this.#api.createMessage({
         channelId: target.channelId,
         content,
@@ -518,6 +554,28 @@ export class DiscordBotClient {
       messageIdForResult: (message) => message?.id,
     });
     return stream.start();
+  }
+
+  #pendingInteraction(target) {
+    const interaction = target ? this.#interactions.get(target) : null;
+    if (!interaction || interaction.completed === true) return null;
+    return interaction;
+  }
+
+  /** Read back a bound interaction without consuming it (used for the fallback). */
+  interactionFor(target) {
+    return target ? this.#interactions.get(target) ?? null : null;
+  }
+  #completeInteraction(interaction, content) {
+    return this.#api.editInteractionResponse({
+      applicationId: interaction.applicationId,
+      interactionToken: interaction.token,
+      body: { content },
+      signal: this.#signal,
+    }).then((result) => {
+      interaction.completed = true;
+      return result;
+    });
   }
 
   #operationSignal(signal) {
@@ -554,6 +612,7 @@ export class DiscordRuntime {
   #random;
   #status = createDiscordRuntimeStatus();
   #api = null;
+  #client = null;
   #bridge = null;
   #abortController = null;
   #socket = null;
@@ -570,6 +629,9 @@ export class DiscordRuntime {
   #starting = null;
   #channels = new Map();
   #routing = new Map();
+  #commandCatalog;
+  #connecting = false;
+  #commandMenuDirty = false;
 
   constructor({
     config,
@@ -581,6 +643,7 @@ export class DiscordRuntime {
     logger = console,
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 20_000,
+    commandCatalog = SHARED_COMMAND_CATALOG,
     createApi = (options) => new DiscordApi(options),
     createWebSocket = (url) => new WebSocket(url),
     random = Math.random,
@@ -598,6 +661,7 @@ export class DiscordRuntime {
     this.#logger = logger; this.#diagnostics = createConnectionDiagnostics({ channel: 'discord', logger });
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
+    this.#commandCatalog = commandCatalog;
     this.#createApi = createApi;
     this.#createWebSocket = createWebSocket;
     this.#random = random;
@@ -645,6 +709,38 @@ export class DiscordRuntime {
     return this.#bridge.sendProactiveText({ channelId }, text, options);
   }
 
+  /**
+   * Push the shared command catalog to Discord as global application commands.
+   * The call is idempotent: Discord replaces the whole table in one PUT and the
+   * registry skips the request when the registered table already matches.
+   */
+  async #sendCommandMenu(api, signal) {
+    const commands = discordCommandDefinitions(this.#commandCatalog);
+    return syncDiscordCommands({ api, commands, signal });
+  }
+
+  /**
+   * Re-register the command menu in the current host message language. Called by
+   * the host controller on startup and whenever the IM host language changes.
+   *
+   * @returns whether a connected bot accepted the refreshed menu.
+   */
+  async refreshCommandMenu() {
+    const api = this.#api;
+    const signal = this.#abortController?.signal;
+    if (!this.#status.ready || !api || !signal || signal.aborted) {
+      if (this.#connecting) this.#commandMenuDirty = true;
+      return false;
+    }
+    try {
+      await this.#sendCommandMenu(api, signal);
+      return true;
+    } catch (error) {
+      this.#logger.warn?.(`[dsh-im:discord] bot ${this.#config.botId} command menu refresh failed:`, extractConnectionEvidence(error).details);
+      return false;
+    }
+  }
+
   async start() {
     if (this.#status.ready && this.#socket) return this.status;
     if (this.#starting) return this.#starting;
@@ -656,6 +752,8 @@ export class DiscordRuntime {
 
   async #start() {
     await this.stop();
+    this.#connecting = true;
+    this.#commandMenuDirty = false;
     this.#stopped = false;
     this.#sessionId = null;
     this.#resumeUrl = null;
@@ -681,7 +779,14 @@ export class DiscordRuntime {
         throw new Error('Discord token identity does not match the saved bot');
       }
       this.#gatewayUrl = gateway?.url;
+      try {
+        await this.#sendCommandMenu(api, controller.signal);
+      } catch (error) {
+        // A stale command menu must never keep the bot offline.
+        this.#logger.warn?.(`[dsh-im:discord] bot ${this.#config.botId} command menu setup failed:`, extractConnectionEvidence(error).details);
+      }
       const client = new DiscordBotClient({ api, signal: controller.signal });
+      this.#client = client;
       this.#bridge = new DiscordHarnessBridge({
         bot: client,
         harness: this.#harness,
@@ -704,6 +809,14 @@ export class DiscordRuntime {
       } finally {
         clearTimeout(timer);
       }
+      if (this.#commandMenuDirty) {
+        this.#commandMenuDirty = false;
+        try {
+          await this.#sendCommandMenu(api, controller.signal);
+        } catch (error) {
+          this.#logger.warn?.(`[dsh-im:discord] bot ${this.#config.botId} command menu catch-up failed:`, extractConnectionEvidence(error).details);
+        }
+      }
       return this.status;
     } catch (error) {
       this.#status.ready = false;
@@ -712,6 +825,9 @@ export class DiscordRuntime {
       this.#status.lastError = this.#status.error.message;
       await this.stop();
       throw error;
+    } finally {
+      this.#connecting = false;
+      this.#commandMenuDirty = false;
     }
   }
 
@@ -821,6 +937,17 @@ export class DiscordRuntime {
               );
             });
           }
+        } else if (packet.t === 'INTERACTION_CREATE') {
+          const bridge = this.#bridge;
+          if (packet.d && bridge) {
+            void this.#acceptInteraction(packet.d, bridge).catch((error) => {
+              if (generation !== this.#generation || this.#stopped) return;
+              this.#logger.error?.(
+                `[dsh-im:discord] bot ${this.#config.botId} interaction handling failed:`,
+                extractConnectionEvidence(error).details,
+              );
+            });
+          }
         }
       });
       addSocketListener(socket, 'close', (event = {}) => {
@@ -917,6 +1044,113 @@ export class DiscordRuntime {
     }
   }
 
+  /**
+   * Handle a native application-command interaction. The interaction is answered
+   * through the deferred-response webhook, so the shared bridge can keep replying
+   * to `replyTarget` exactly as it does for ordinary messages.
+   */
+  async #acceptInteraction(interaction, bridge) {
+    const type = Number(interaction?.type);
+    if (type === DISCORD_PING_INTERACTION_TYPE) {
+      // A PING carries no command but still has to be answered.
+      const pingId = String(interaction?.id ?? '');
+      const pingToken = String(interaction?.token ?? '');
+      if (!pingId || !pingToken) return;
+      await this.#api.createInteractionResponse({
+        interactionId: pingId,
+        interactionToken: pingToken,
+        body: { type: DISCORD_PING_INTERACTION_TYPE },
+        signal: this.#abortController?.signal,
+      });
+      return;
+    }
+    if (type !== DISCORD_APPLICATION_COMMAND_INTERACTION_TYPE) return;
+    const interactionId = String(interaction?.id ?? '');
+    const token = String(interaction?.token ?? '');
+    const text = discordCommandText(interaction, this.#commandCatalog);
+    if (!interactionId || !token || !text) return;
+    const messageId = `interaction:${interactionId}`;
+    if (this.#state.hasSeen(messageId)) return;
+    const channelId = String(interaction.channel_id ?? '');
+    if (!channelId) return;
+    const senderId = String(interaction.member?.user?.id ?? interaction.user?.id ?? '');
+    if (!senderId) return;
+    const kind = interaction.guild_id ? 'group' : 'direct';
+    const applicationId = String(interaction.application_id ?? this.#config.platformId ?? '');
+    const accessDecision = evaluateInboundAccess(this.#accessPolicy, {
+      conversationType: kind,
+      senderIds: [senderId],
+      text,
+    });
+    // Acknowledge within Discord's three-second deadline before any other work;
+    // the deferred response is completed later by the first delivered chunk.
+    await this.#api.createInteractionResponse({
+      interactionId,
+      interactionToken: token,
+      body: { type: DISCORD_DEFERRED_CHANNEL_MESSAGE_TYPE },
+      signal: this.#abortController?.signal,
+    });
+    const replyTarget = { channelId };
+    const client = this.#client;
+    if (client?.attachInteraction) {
+      client.attachInteraction(replyTarget, {
+        id: interactionId,
+        token,
+        applicationId,
+        completed: false,
+      });
+    }
+    const senderName = interaction.member?.nick
+      ?? interaction.member?.user?.username
+      ?? interaction.user?.username;
+    const contextSnapshot = captureContextEnhancement(this.#contextEnhancement, kind);
+    const busyMessageMode = this.#harness.currentBusyMessageMode?.() ?? 'queue';
+    try {
+      await bridge.accept({
+        messageId,
+        senderId,
+        conversationId: channelId,
+        kind,
+        addressed: true,
+        requiresMention: false,
+        content: text,
+        controlText: text,
+        plainText: true,
+        images: [],
+        files: [],
+        replyTarget,
+        connectionTestTarget: { channelId },
+        contextSource: () => ({ senderName, chatId: channelId }),
+      }, {
+        contextSnapshot,
+        busyMessageMode,
+        ...(accessDecision ? { accessDecision } : {}),
+      });
+    } finally {
+      // Never leave the invoker staring at a deferred placeholder.
+      await this.#finalizeInteraction(replyTarget, client);
+    }
+  }
+
+  async #finalizeInteraction(replyTarget, client) {
+    const interaction = client?.interactionFor?.(replyTarget);
+    if (!interaction || interaction.completed === true) return;
+    interaction.completed = true;
+    try {
+      await this.#api.editInteractionResponse({
+        applicationId: interaction.applicationId,
+        interactionToken: interaction.token,
+        body: { content: t('处理完成。') },
+        signal: this.#abortController?.signal,
+      });
+    } catch (error) {
+      this.#logger.warn?.(
+        `[dsh-im:discord] bot ${this.#config.botId} failed to complete an interaction response:`,
+        extractConnectionEvidence(error).details,
+      );
+    }
+  }
+
   #sendGateway(socket, payload) {
     if (socket.readyState !== 1) return;
     socket.send(JSON.stringify(payload));
@@ -982,8 +1216,11 @@ export class DiscordRuntime {
     const bridge = this.#bridge;
     this.#socket = null;
     this.#bridge = null;
+    this.#client = null;
     this.#api = null;
     this.#routing.clear();
+    this.#connecting = false;
+    this.#commandMenuDirty = false;
     try {
       if (socket && socket.readyState < 2) socket.close(1000, 'Plugin stopped');
     } catch (error) {

@@ -88,10 +88,28 @@ function snowflake(value, name) {
   return id;
 }
 
+// Application command registration accepts the literal `@me` application id,
+// which is how the runtime registers without storing an application id.
+function applicationCommandsPath(applicationId, guildId) {
+  const application = applicationId === '@me' ? '@me' : snowflake(applicationId, 'application id');
+  const base = `applications/${application}/commands`;
+  return guildId ? `applications/${application}/guilds/${snowflake(guildId, 'guild id')}/commands` : base;
+}
+
 function reactionEmoji(value) {
   const emoji = cleanString(value);
   if (!emoji) throw new TypeError('A Discord reaction emoji is required');
   return emoji;
+}
+
+// Interaction tokens are opaque, single-use webhook credentials. They are not
+// snowflakes, so they are validated by shape rather than by digits.
+function interactionToken(value) {
+  const token = cleanString(value);
+  if (!token || !/^[A-Za-z0-9._-]{10,200}$/.test(token)) {
+    throw new TypeError('Invalid Discord interaction token');
+  }
+  return token;
 }
 
 export function validDiscordToken(value) {
@@ -129,6 +147,52 @@ export class DiscordApi {
 
   getGatewayBot(options = {}) {
     return this.#request('gateway/bot', { ...options, method: 'GET' });
+  }
+
+  // `applications/@me` resolves to the bot's own application, so registration
+  // never has to know or store an application id.
+  listApplicationCommands({ applicationId = '@me', guildId, signal } = {}) {
+    return this.#request(applicationCommandsPath(applicationId, guildId), {
+      method: 'GET',
+      signal,
+    });
+  }
+
+  // Discord replaces the whole table in one PUT: the request body is the
+  // complete desired command list, so no per-command diffing is needed.
+  setApplicationCommands({ applicationId = '@me', guildId, commands, signal } = {}) {
+    if (!Array.isArray(commands)) throw new TypeError('Discord commands must be an array');
+    return this.#request(applicationCommandsPath(applicationId, guildId), {
+      method: 'PUT',
+      signal,
+      body: commands,
+    });
+  }
+
+  deleteApplicationCommand({ applicationId = '@me', guildId, commandId, signal } = {}) {
+    return this.#request(
+      `${applicationCommandsPath(applicationId, guildId)}/${snowflake(commandId, 'command id')}`,
+      { method: 'DELETE', signal, expectBody: false },
+    );
+  }
+
+  // Interactions must be acknowledged within three seconds or Discord shows
+  // "The application did not respond". The callback is a webhook, not a
+  // Gateway reply, and Discord never retries it.
+  createInteractionResponse({ interactionId, interactionToken, body, signal } = {}) {
+    return this.#request(
+      `interactions/${snowflake(interactionId, 'interaction id')}/${interactionToken(interactionToken)}/callback`,
+      { method: 'POST', signal, body, expectBody: false, retry: false, timeoutMs: 5_000 },
+    );
+  }
+
+  // Deferred interaction responses are completed through the application
+  // webhook rather than the channel message endpoint.
+  editInteractionResponse({ applicationId, interactionToken, body, signal } = {}) {
+    return this.#request(
+      `webhooks/${snowflake(applicationId, 'application id')}/${interactionToken(interactionToken)}/messages/@me`,
+      { method: 'PATCH', signal, body, retry: false },
+    );
   }
 
   getChannel({ channelId, signal } = {}) {
