@@ -254,6 +254,32 @@ test('Discord API rejects a malformed interaction token before issuing a request
   assert.equal(calls, 0);
 });
 
+test('Discord API accepts a real-length interaction token', async () => {
+  // Discord issues a base64url interaction token that encodes the interaction
+  // id and its signature; live tokens measure 214 characters. A validator
+  // capped below that rejected every real interaction before it left the
+  // process, so the ACK never reached Discord and no command ever answered.
+  const requests = [];
+  const api = new DiscordApi({
+    token: TOKEN,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return new Response(null, { status: 204 });
+    },
+  });
+  const interactionToken = 'aW50ZXJhY3Rpb246MTU1OTUyMjkxMzEyNjcxOTU4OTpOSkx1b1djV2tMNDZrUmJVQnhWUFVqUHNTbXlvVldHTUdaUTQzTzAxVTRreTlRMEFvbU52V0Vrelp1V3RzM3pHTFJoUHJBcmpieFZwdEJRY1VKVUVDTkF4Q2F3M2pxelN0c3FBUHFSckRkVTBOZmtGN0ZBVnNQclJldDFtZE5oaw';
+  assert.equal(interactionToken.length, 214);
+
+  await api.createInteractionResponse({
+    interactionId: '111111111111111112',
+    interactionToken,
+    body: { type: 5 },
+  });
+
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url.pathname, new RegExp(`/${interactionToken}/callback$`, 'u'));
+});
+
 test('Discord API registers application commands against a real application id', async () => {
   const requests = [];
   const api = new DiscordApi({

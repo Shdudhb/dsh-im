@@ -15,6 +15,8 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 - 修正 Discord 应用指令的注册与回调端点：指令注册改用 `applications/@me` 解析出的真实 Application ID，Interaction 回复改用官方文档的 `webhooks/{application_id}/{token}/messages/@original`，并修正 interaction token 校验函数被同名参数遮蔽导致的 TypeError。以上问题会使斜线指令在注册或回复阶段失败。
   Correct the Discord application-command registration and callback endpoints: registration now uses the real Application ID resolved from `applications/@me`, interaction replies use the documented `webhooks/{application_id}/{token}/messages/@original`, and the interaction token validator no longer throws a TypeError from being shadowed by a same-named parameter. These defects broke slash commands during registration or reply.
+- 放宽 Discord interaction token 的长度上限：真实 token 为编码了交互 ID 与签名的 base64url 文本，实测 214 字符，原先 200 字符的上限会在请求发出前拒绝每一次真实交互，导致斜线指令始终无响应。校验仍然拒绝空值、机器人令牌和雪花 ID 等明显错误的值。
+  Relax the Discord interaction token length cap: real tokens are base64url text encoding the interaction id and its signature and measure 214 characters, so the previous 200-character ceiling rejected every real interaction before a request was issued and left slash commands unresponsive. Validation still rejects empty values, bot tokens, and snowflakes.
 
 ## [4.38.1] - 2026-10-12
 

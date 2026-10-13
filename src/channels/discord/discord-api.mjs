@@ -107,12 +107,14 @@ function reactionEmoji(value) {
 }
 
 // Interaction tokens are opaque, single-use webhook credentials. They are not
-// snowflakes, so they are validated by shape rather than by digits. Named
-// `validateInteractionToken` because the API methods take a parameter of the
-// same name, which would otherwise shadow this helper.
+// snowflakes, so they are validated by shape rather than by digits. Discord
+// sends base64url text whose length grows with the encoded interaction id and
+// signature (observed at 214 characters), so the upper bound is generous: the
+// point of the check is to reject an obviously wrong value such as a bot token,
+// a snowflake or an empty string, not to police the encoding.
 function validateInteractionToken(value) {
   const token = cleanString(value);
-  if (!token || !/^[A-Za-z0-9._-]{10,200}$/.test(token)) {
+  if (!token || !/^[A-Za-z0-9._-]{10,4096}$/.test(token)) {
     throw new TypeError('Invalid Discord interaction token');
   }
   return token;
