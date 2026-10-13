@@ -8,4 +8,5 @@ export default {
   'Thread 创建结果暂时无法确认。若已创建，请在对应 Thread 中重试；若未创建，请稍后重新 @机器人。':
     'The Thread creation result cannot be confirmed yet. If the Thread was created, retry inside it; if it was not, mention the bot again shortly.',
   '命令参数，用法与对应的文本命令一致': 'Command arguments, used exactly like the matching text command',
+  '已在新 Thread 中继续本次会话：{thread}': 'Continuing this session in a new Thread: {thread}',
 };

@@ -22,6 +22,7 @@ const PARENT_ID = '222222222222222270';
 const GUILD_ID = '444444444444444444';
 const USER_ID = '333333333333333330';
 const INTERACTION_TOKEN = 'interaction-token-abcdefghijklmnop';
+const THREAD_ID = '777777777777777770';
 
 function deferred() {
   let resolve;
@@ -124,7 +125,7 @@ function runtimeFor(t, {
   partialApi = false,
   logger = { warn() {}, error(...args) { assert.fail(args.join(' ')); } },
 } = {}) {
-  const calls = { list: [], set: [], ack: [], edit: [], created: [], cleared: [] };
+  const calls = { list: [], set: [], ack: [], edit: [], created: [], cleared: [], threads: [] };
   const asks = [];
   let socket;
   const api = {
@@ -132,6 +133,10 @@ function runtimeFor(t, {
     getCurrentApplication: async () => ({ id: BOT_ID }),
     getGatewayBot: async () => ({ url: 'wss://gateway.discord.gg' }),
     getChannel: async ({ channelId }) => ({ id: channelId, type: 0 }),
+    startThread: async (request) => {
+      calls.threads.push(request);
+      return { id: THREAD_ID, type: 11, parent_id: request.channelId, owner_id: BOT_ID };
+    },
     sendTyping: async () => {},
     createMessage: async (request) => {
       calls.created.push(request);
@@ -413,7 +418,7 @@ test('refreshCommandMenu follows the host language into the registered descripti
   setImHostLanguage(previous);
 });
 
-test('Discord acknowledges a slash command and completes the deferred response', async (t) => {
+test('Discord opens a Thread for a guild command and answers inside it', async (t) => {
   const { runtime, calls, socket } = runtimeFor(t);
   await runtime.start();
   socket().emit('message', {
@@ -425,17 +430,52 @@ test('Discord acknowledges a slash command and completes the deferred response',
     }),
   });
   emitInteraction(socket(), interactionPayload({ name: 'version' }));
-  await eventually(() => calls.edit.length === 1);
+  await eventually(() => calls.created.length === 1);
   assert.equal(calls.ack.length, 1);
   assert.equal(calls.ack[0].interactionId, '999999999999999999');
   assert.equal(calls.ack[0].interactionToken, INTERACTION_TOKEN);
   assert.deepEqual(calls.ack[0].body, { type: 5 });
+  // The original habit is preserved: a guild command opens a Thread first.
+  assert.equal(calls.threads.length, 1);
+  assert.equal(calls.threads[0].channelId, PARENT_ID);
+  assert.match(calls.threads[0].name, /version/u);
   assert.equal(calls.edit.length, 1);
   assert.equal(calls.edit[0].applicationId, BOT_ID);
   assert.equal(calls.edit[0].interactionToken, INTERACTION_TOKEN);
+  assert.match(calls.edit[0].body.content, new RegExp(THREAD_ID, 'u'));
+  // The answer lands in the Thread as an ordinary channel message.
+  assert.equal(calls.created[0].channelId, THREAD_ID);
+  assert.match(calls.created[0].content, /^dsh-im v\d+\.\d+\.\d+$/u);
+  assert.equal(runtime.status.ready, true);
+});
+
+test('Discord answers a direct-message command in place without a Thread', async (t) => {
+  const { runtime, calls, socket } = runtimeFor(t);
+  await runtime.start();
+  emitInteraction(socket(), interactionPayload({ name: 'version', guildId: null }));
+  await eventually(() => calls.edit.length === 1);
+  assert.deepEqual(calls.ack[0].body, { type: 5 });
+  assert.deepEqual(calls.threads, [], 'a direct message cannot host a Thread');
   assert.match(calls.edit[0].body.content, /^dsh-im v\d+\.\d+\.\d+$/u);
   assert.equal(calls.created.length, 0, 'a single-chunk reply must not post a second message');
-  assert.equal(runtime.status.ready, true);
+});
+
+test('Discord still answers when Thread creation fails', async (t) => {
+  const { runtime, calls, socket, api } = runtimeFor(t);
+  api.startThread = async () => { throw Object.assign(new Error('Missing Permissions'), { code: 'discord-403' }); };
+  await runtime.start();
+  socket().emit('message', {
+    data: JSON.stringify({
+      op: 0, t: 'GUILD_CREATE', s: 2,
+      d: { id: GUILD_ID, channels: [{ id: PARENT_ID, type: 0 }], threads: [] },
+    }),
+  });
+  emitInteraction(socket(), interactionPayload({ name: 'version' }));
+  await eventually(() => calls.edit.length === 1);
+  assert.equal(calls.ack.length, 1);
+  // No Thread: the deferred placeholder carries the answer in place.
+  assert.equal(calls.created.length, 0);
+  assert.match(calls.edit[0].body.content, /^dsh-im v\d+\.\d+\.\d+$/u);
 });
 
 test('Discord answers a PING interaction without touching the session or the model', async (t) => {
@@ -508,7 +548,7 @@ test('Discord completes the deferred response even when the command is not permi
 
 test('Discord runs a native command through the shared bridge and keeps the session key', async (t) => {
   const state = memoryState();
-  state.sessions.set(`group:${PARENT_ID}`, 'session-existing');
+  state.sessions.set(`group:${THREAD_ID}`, 'session-existing');
   const { runtime, calls, socket } = runtimeFor(t, { state });
   await runtime.start();
   socket().emit('message', {
@@ -520,10 +560,12 @@ test('Discord runs a native command through the shared bridge and keeps the sess
     }),
   });
   emitInteraction(socket(), interactionPayload({ name: 'new' }), 3);
-  await eventually(() => calls.edit.length === 1);
-  assert.match(calls.edit[0].body.content, /新会话/u);
-  assert.equal(state.sessions.has(`group:${PARENT_ID}`), false);
-  assert.equal(calls.created.length, 0);
+  await eventually(() => calls.created.length === 1);
+  // The Session is bound to the Thread, exactly like the text-command habit.
+  assert.equal(state.sessions.has(`group:${THREAD_ID}`), false);
+  assert.equal(calls.created[0].channelId, THREAD_ID);
+  assert.match(calls.created[0].content, /新会话/u);
+  assert.equal(calls.threads.length, 1);
 });
 
 test('Discord bot client completes a bound interaction once, then posts ordinary messages', async () => {

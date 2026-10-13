@@ -3,6 +3,8 @@ import { t } from '../shared/i18n.mjs';
 
 const DEFAULT_BASE_URL = 'https://discord.com/api/v10/';
 const DEFAULT_FILE_UPLOAD_TIMEOUT_MS = 120_000;
+const PUBLIC_THREAD = 11;
+const PRIVATE_THREAD = 12;
 const DISCORD_PERMISSION_ERRORS = new Set([50001, 50013]);
 const DISCORD_TOO_LARGE_ERRORS = new Set([40005]);
 
@@ -212,6 +214,24 @@ export class DiscordApi {
       `channels/${snowflake(channelId, 'channel id')}/messages/${snowflake(messageId, 'message id')}`,
       { method: 'GET', signal },
     );
+  }
+
+  // Start Thread without Message. A native application command has no source
+  // message, so `startThreadFromMessage` is not usable for that path.
+  startThread({ channelId, name, type = PUBLIC_THREAD, signal } = {}) {
+    const threadName = cleanString(name);
+    if (!threadName || [...threadName].length > 100) {
+      throw new TypeError('Discord thread name must contain 1-100 characters');
+    }
+    if (type !== PUBLIC_THREAD && type !== PRIVATE_THREAD) {
+      throw new TypeError('Discord thread type must be a public or private thread');
+    }
+    if (signal?.aborted) throw abortReason(signal);
+    return this.#request(`channels/${snowflake(channelId, 'channel id')}/threads`, {
+      method: 'POST',
+      signal,
+      body: { name: threadName, type },
+    });
   }
 
   startThreadFromMessage({ channelId, messageId, name, signal } = {}) {

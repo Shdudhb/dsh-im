@@ -8,8 +8,8 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ### Added / 新增
 
-- Discord 机器人支持原生斜线指令：登录后自动把共享指令目录注册为全局应用指令，并随 Host 语言切换同步刷新。指令输入经 Interaction 回调在 3 秒内确认，回复沿用既有文本指令语义（参数、权限与 Session 绑定完全一致），未新增或改动任何指令行为。
-  Discord bots support native slash commands: the shared command catalog is registered as global application commands on connect and refreshed when the Host language changes. Interactions are acknowledged within Discord's three-second deadline and answered with the existing text-command semantics (arguments, permissions, and Session binding unchanged).
+- Discord 机器人支持原生斜线指令：登录后自动把共享指令目录注册为全局应用指令，并随 Host 语言切换同步刷新。指令输入经 Interaction 回调在 3 秒内确认；在服务器频道中执行时与文本指令一致地先创建 Thread 并在其中继续会话，私聊则原地回复，参数、权限与 Session 绑定完全沿用既有语义。
+  Discord bots support native slash commands: the shared command catalog is registered as global application commands on connect and refreshed when the Host language changes. Interactions are acknowledged within Discord's three-second deadline; invoking one in a guild channel opens a Thread and continues the session there exactly like the text-command habit, while direct messages are answered in place. Arguments, permissions, and Session binding are unchanged.
 
 ### Fixed / 修复
 

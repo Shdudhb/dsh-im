@@ -1119,14 +1119,32 @@ export class DiscordRuntime {
       body: { type: DISCORD_DEFERRED_CHANNEL_MESSAGE_TYPE },
       signal: this.#abortController?.signal,
     });
-    const replyTarget = { channelId };
+    // A denied command never opens a Thread: the refusal is answered in place.
+    const threadId = kind === 'group' && accessDecision.allowed
+      ? await this.#startInteractionThread(channelId, text)
+      : null;
+    const replyTarget = { channelId: threadId ?? channelId };
     const client = this.#client;
-    if (client?.attachInteraction) {
-      client.attachInteraction(replyTarget, {
-        id: interactionId,
-        token,
+    const binding = {
+      id: interactionId,
+      token,
+      applicationId,
+      threadId,
+      completed: false,
+    };
+    if (client?.attachInteraction) client.attachInteraction(replyTarget, binding);
+    if (threadId) {
+      // Point the invoker at the Thread up front, then let every reply land in
+      // it as an ordinary channel message. Marking the response complete keeps
+      // the deliveries out of the deferred placeholder.
+      binding.completed = true;
+      await this.#api.editInteractionResponse({
         applicationId,
-        completed: false,
+        interactionToken: token,
+        body: {
+          content: t('已在新 Thread 中继续本次会话：{thread}', { thread: `<#${threadId}>` }),
+        },
+        signal: this.#abortController?.signal,
       });
     }
     const senderName = interaction.member?.nick
@@ -1138,7 +1156,7 @@ export class DiscordRuntime {
       await bridge.accept({
         messageId,
         senderId,
-        conversationId: channelId,
+        conversationId: threadId ?? channelId,
         kind,
         addressed: true,
         requiresMention: false,
@@ -1148,8 +1166,8 @@ export class DiscordRuntime {
         images: [],
         files: [],
         replyTarget,
-        connectionTestTarget: { channelId },
-        contextSource: () => ({ senderName, chatId: channelId }),
+        connectionTestTarget: { channelId: threadId ?? channelId },
+        contextSource: () => ({ senderName, chatId: threadId ?? channelId }),
       }, {
         contextSnapshot,
         busyMessageMode,
@@ -1158,6 +1176,37 @@ export class DiscordRuntime {
     } finally {
       // Never leave the invoker staring at a deferred placeholder.
       await this.#finalizeInteraction(replyTarget, client);
+    }
+  }
+
+  /**
+   * Mirror the text-command habit: a command invoked in a guild channel opens a
+   * Thread and the conversation continues there, so later messages need no
+   * mention and the Session is bound to the Thread. Returns the new Thread id,
+   * or null when the channel cannot host a Thread or creation failed.
+   */
+  async #startInteractionThread(channelId, text) {
+    const signal = this.#abortController?.signal;
+    try {
+      const cached = this.#channels.get(channelId);
+      const source = cached ?? await this.#api.getChannel({ channelId, signal });
+      if (!cached) this.#rememberChannel(source);
+      const type = Number(source?.type);
+      if (type !== GUILD_TEXT && type !== GUILD_ANNOUNCEMENT) return null;
+      const thread = await this.#api.startThread({
+        channelId,
+        name: cleanThreadName({ content: text, channel_id: channelId }, this.#config.platformId),
+        signal,
+      });
+      this.#rememberChannel(thread);
+      return isThreadChannel(thread) && thread?.id ? String(thread.id) : null;
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason ?? error;
+      this.#logger.warn?.(
+        `[dsh-im:discord] bot ${this.#config.botId} Thread creation failed for an interaction:`,
+        extractConnectionEvidence(error).details,
+      );
+      return null;
     }
   }
 
