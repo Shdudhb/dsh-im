@@ -43,6 +43,7 @@ const COMMANDS_WITH_INPUT = new Set([
   'model',
   'preset',
   'steer',
+  'thread',
 ]);
 
 const INPUT_OPTION_DESCRIPTION = '命令参数，用法与对应的文本命令一致';

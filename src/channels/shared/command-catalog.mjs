@@ -42,7 +42,11 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
     '/conv 或 /conversation  查看当前对话工作区',
     '/conv 工作区绝对路径或序号  设置当前对话专属工作区',
     '/conv clear  清除专属工作区，回到 bot 默认工作区',
-  ], { aliases: ['conversation', 'thread'] }),
+  ], { aliases: ['conversation'] }),
+  defineCatalogCommand('thread', '在频道中创建讨论串，随后在讨论串中提问（仅 Discord）', [
+    '/thread [名称]  在当前频道创建一个讨论串（未填名称时自动命名）',
+    '创建后本指令不再回复，请在讨论串中重新发送你的问题',
+  ], { channels: ['discord'] }),
   defineCatalogCommand('workspacelist', '列出工作区绝对路径', [
     '/workspacelist  列出工作区绝对路径',
     '/ws、/wsl、/workspaces  工作区命令别名',

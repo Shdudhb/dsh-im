@@ -1,0 +1,10 @@
+{
+  "zh": [
+    "/thread [名称]  在当前频道创建一个讨论串（未填名称时自动命名）",
+    "创建后本指令不再回复，请在讨论串中重新发送你的问题"
+  ],
+  "en": [
+    "/thread [name]  Create a Thread in the current channel (auto-named when omitted)",
+    "This command sends no reply of its own - resend your question inside the Thread"
+  ]
+}

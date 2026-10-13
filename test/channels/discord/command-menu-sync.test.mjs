@@ -418,7 +418,7 @@ test('refreshCommandMenu follows the host language into the registered descripti
   setImHostLanguage(previous);
 });
 
-test('Discord opens a Thread for a guild command and answers inside it', async (t) => {
+test('Discord answers a guild command in place without opening a Thread', async (t) => {
   const { runtime, calls, socket } = runtimeFor(t);
   await runtime.start();
   socket().emit('message', {
@@ -430,22 +430,41 @@ test('Discord opens a Thread for a guild command and answers inside it', async (
     }),
   });
   emitInteraction(socket(), interactionPayload({ name: 'version' }));
-  await eventually(() => calls.created.length === 1);
+  await eventually(() => calls.created.length === 1 || calls.edit.some((call) => call.body?.content));
   assert.equal(calls.ack.length, 1);
   assert.equal(calls.ack[0].interactionId, '999999999999999999');
   assert.equal(calls.ack[0].interactionToken, INTERACTION_TOKEN);
   assert.deepEqual(calls.ack[0].body, { type: 5 });
-  // The original habit is preserved: a guild command opens a Thread first.
+  // Threads are opt-in: an ordinary guild command stays in its channel.
+  assert.deepEqual(calls.threads, [], 'an ordinary guild command must not open a Thread');
+  assert.equal(calls.created.length, 0, 'the deferred response carries the reply');
+  const answer = calls.edit.find((call) => call.body?.content);
+  assert.match(answer.body.content, /^dsh-im v\d+\.\d+\.\d+$/u);
+  assert.equal(runtime.status.ready, true);
+});
+
+test('Discord opens a Thread for /thread and never forwards the command to the model', async (t) => {
+  const { runtime, calls, socket } = runtimeFor(t);
+  await runtime.start();
+  socket().emit('message', {
+    data: JSON.stringify({
+      op: 0,
+      t: 'GUILD_CREATE',
+      s: 2,
+      d: { id: GUILD_ID, channels: [{ id: PARENT_ID, type: 0 }], threads: [] },
+    }),
+  });
+  emitInteraction(socket(), interactionPayload({ name: 'thread' }));
+  await eventually(() => calls.edit.length === 1);
   assert.equal(calls.threads.length, 1);
   assert.equal(calls.threads[0].channelId, PARENT_ID);
-  assert.match(calls.threads[0].name, /version/u);
-  assert.equal(calls.edit.length, 1);
+  assert.match(calls.threads[0].name, /thread/u);
   assert.equal(calls.edit[0].applicationId, BOT_ID);
   assert.equal(calls.edit[0].interactionToken, INTERACTION_TOKEN);
   assert.match(calls.edit[0].body.content, new RegExp(THREAD_ID, 'u'));
-  // The answer lands in the Thread as an ordinary channel message.
-  assert.equal(calls.created[0].channelId, THREAD_ID);
-  assert.match(calls.created[0].content, /^dsh-im v\d+\.\d+\.\d+$/u);
+  // `/thread` is a pure control command: it points the invoker at the Thread
+  // and posts nothing else - the model never sees it.
+  assert.deepEqual(calls.created, [], 'the command must not reach the model');
   assert.equal(runtime.status.ready, true);
 });
 
@@ -560,12 +579,13 @@ test('Discord runs a native command through the shared bridge and keeps the sess
     }),
   });
   emitInteraction(socket(), interactionPayload({ name: 'new' }), 3);
-  await eventually(() => calls.created.length === 1);
-  // The Session is bound to the Thread, exactly like the text-command habit.
-  assert.equal(state.sessions.has(`group:${THREAD_ID}`), false);
-  assert.equal(calls.created[0].channelId, THREAD_ID);
-  assert.match(calls.created[0].content, /新会话/u);
-  assert.equal(calls.threads.length, 1);
+  await eventually(() => calls.created.length >= 1 || calls.edit.some((call) => call.body?.content));
+  // The Session stays bound to the channel it was invoked in, so the Thread key
+  // set up by the fixture is never consulted.
+  assert.equal(state.sessions.has(`group:${THREAD_ID}`), true);
+  assert.deepEqual(calls.threads, [], 'an ordinary guild command must not open a Thread');
+  const reply = calls.created[0] ?? calls.edit.find((call) => call.body?.content);
+  assert.match(reply.content ?? reply.body.content, /新会话/u);
 });
 
 test('Discord bot client completes a bound interaction once, then posts ordinary messages', async () => {

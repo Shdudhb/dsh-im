@@ -2225,7 +2225,7 @@ test('/conv command shows, sets, and clears the conversation workspace', async (
   assert.equal(override, null);
 });
 
-test('/conversation and /thread aliases still drive the conversation workspace', async (t) => {
+test('/conversation drives the conversation workspace and /thread no longer does', async (t) => {
   const { defaultWorkspace, alternateWorkspace } = await fixture(t);
   let override = null;
   const harness = {
@@ -2236,7 +2236,7 @@ test('/conversation and /thread aliases still drive the conversation workspace',
   };
   const key = 'group:1';
 
-  for (const command of ['/conversation', '/thread']) {
+  for (const command of ['/conversation']) {
     override = null;
     const show = await runWorkspaceCommand(command, harness, key);
     assert.ok(show?.message.includes('当前对话工作区'), `${command} 应能查看`);
@@ -2247,6 +2247,13 @@ test('/conversation and /thread aliases still drive the conversation workspace',
     assert.ok(clear?.message.includes('已清除'), `${command} 应能清除`);
     assert.equal(override, null);
   }
+
+  // `/thread` is now a Discord-only Thread command, so it must not touch the
+  // conversation workspace at all.
+  override = null;
+  assert.equal(await runWorkspaceCommand('/thread', harness, key), null);
+  assert.equal(await runWorkspaceCommand(`/thread ${alternateWorkspace}`, harness, key), null);
+  assert.equal(override, null);
 });
 
 test('binding a conversation to the current bot default is persisted, not a no-op', async (t) => {

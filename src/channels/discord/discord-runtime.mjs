@@ -90,6 +90,16 @@ function isThreadChannel(channel) {
   return THREAD_TYPES.has(Number(channel?.type));
 }
 
+// Threads are opt-in: only `/thread` opens one. The argument is the Thread name,
+// which falls back to a default when omitted. `/thread` is a pure control
+// command - it is never forwarded to the model.
+export function discordThreadRequest(text) {
+  const match = /^\/thread(?:\s+([\s\S]+))?$/i.exec(String(text ?? '').trim());
+  if (!match) return null;
+  const name = (match[1] ?? '').replace(/\s+/g, ' ').trim();
+  return { requested: true, name: name || null };
+}
+
 function isThreadFromMessage(channel, message) {
   return isThreadChannel(channel)
     && String(channel?.id ?? '') === String(message?.id ?? '')
@@ -103,6 +113,7 @@ function rememberChannel(channel, callback) {
 
 function withConversationRoute(normalized, channel, botId, {
   fromSourceMessage = false,
+  controlOnly = false,
   fallback = null,
   notice = null,
 } = {}) {
@@ -115,6 +126,7 @@ function withConversationRoute(normalized, channel, botId, {
     conversationId: channelId,
     addressed: normalized.addressed || managed,
     requiresMention: thread ? !managed : normalized.kind === 'group',
+    ...(controlOnly ? { controlOnly: true } : {}),
     replyTarget: {
       channelId,
       ...(!fromSourceMessage && normalized.replyTarget?.replyToMessageId
@@ -152,6 +164,24 @@ async function findCreatedThread(api, message, { signal, onChannel } = {}) {
   } catch (error) {
     if (error?.status === 404) return null;
     throw error;
+  }
+}
+
+// The Thread already exists by the time this runs, so the notice is strictly
+// best-effort: it must never turn a successful Thread creation into a routing
+// failure, including when the caller's signal aborted mid-dispatch.
+async function sendThreadNotice(api, normalized, thread, signal) {
+  try {
+    await api.createMessage({
+      channelId: normalized.replyTarget.channelId,
+      replyToMessageId: normalized.replyTarget.replyToMessageId,
+      content: t('已创建讨论串，请在讨论串中继续本次会话：{thread}', {
+        thread: `<#${String(thread.id)}>`,
+      }),
+      signal,
+    });
+  } catch {
+    // Swallow every failure, abort included.
   }
 }
 
@@ -376,12 +406,17 @@ export async function resolveDiscordMessageRoute(message, botId, {
     return withConversationRoute(normalized, sourceChannel, botId);
   }
   if (!normalized.addressed) return withConversationRoute(normalized, sourceChannel, botId);
+  // Threads are opt-in: a plain `@bot ...` is answered in the channel it was
+  // sent in. Only `@bot /thread` opens one, and it hangs off the invoking
+  // message so the request itself stays visible in the channel.
+  const threadRequest = discordThreadRequest(normalized.content);
+  if (!threadRequest) return withConversationRoute(normalized, sourceChannel, botId);
 
   const sourceType = Number(sourceChannel?.type);
   if (sourceType !== GUILD_TEXT && sourceType !== GUILD_ANNOUNCEMENT) {
     return withConversationRoute(normalized, sourceChannel, botId, {
       fallback: 'unsupported-channel',
-      notice: '当前频道不支持自动创建 Thread，已直接在当前频道回复。',
+      notice: '当前频道不支持创建 Thread，已直接在当前频道回复。',
     });
   }
 
@@ -391,7 +426,8 @@ export async function resolveDiscordMessageRoute(message, botId, {
     created = rememberChannel(await api.startThreadFromMessage({
       channelId: normalized.conversationId,
       messageId: normalized.messageId,
-      name: cleanThreadName(message, botId),
+      name: threadRequest.name ? cleanThreadName({ content: threadRequest.name }, botId)
+        : cleanThreadName(message, botId),
       signal,
     }), onChannel);
     if (!isThreadFromMessage(created, message)) {
@@ -410,7 +446,11 @@ export async function resolveDiscordMessageRoute(message, botId, {
       throw threadCreateUncertain(recoveryError);
     }
     if (recovered) {
-      return withConversationRoute(normalized, recovered, botId, { fromSourceMessage: true });
+      await sendThreadNotice(api, normalized, recovered, signal);
+      return withConversationRoute(normalized, recovered, botId, {
+        fromSourceMessage: true,
+        controlOnly: true,
+      });
     }
     if (signal?.aborted) throw signal.reason ?? error;
     if (uncertainThreadCreate(error)) {
@@ -422,7 +462,11 @@ export async function resolveDiscordMessageRoute(message, botId, {
       notice: '无法创建 Thread，已直接在当前频道回复。',
     });
   }
-  return withConversationRoute(normalized, created, botId, { fromSourceMessage: true });
+  await sendThreadNotice(api, normalized, created, signal);
+  return withConversationRoute(normalized, created, botId, {
+    fromSourceMessage: true,
+    controlOnly: true,
+  });
 }
 
 export class DiscordBotClient {
@@ -459,7 +503,7 @@ export class DiscordBotClient {
 
   async #sendText(target, text, markdown) {
     const notice = !this.#deliveredNotices.has(target) && target?.notice
-      ? String(target.notice) : null;
+      ? t(String(target.notice)) : null;
     const chunks = (markdown ? chunkMarkdownText : splitMessageText)(notice ? `${notice}\n\n${text}` : text, 1_900);
     const providerMessageIds = [];
     const interaction = this.#pendingInteraction(target);
@@ -516,7 +560,7 @@ export class DiscordBotClient {
 
   async openStream(target) {
     const notice = !this.#deliveredNotices.has(target) && target?.notice
-      ? String(target.notice) : null;
+      ? t(String(target.notice)) : null;
     const decorate = (content) => notice ? `${notice}\n\n${content}` : content;
     const interaction = this.#pendingInteraction(target);
     const stream = createEditableMessageStream({
@@ -1058,6 +1102,12 @@ export class DiscordRuntime {
     }
     try {
       const normalized = await route.pendingRoute;
+      if (normalized?.controlOnly) {
+        // `/thread` is a pure control command: the Thread was opened and the
+        // channel notice already posted, so nothing is forwarded to the model.
+        await this.#state.markSeen(messageId);
+        return;
+      }
       if (normalized) {
         await bridge.accept(normalized, {
           contextSnapshot: route.contextSnapshot,
@@ -1120,8 +1170,13 @@ export class DiscordRuntime {
       signal: this.#abortController?.signal,
     });
     // A denied command never opens a Thread: the refusal is answered in place.
-    const threadId = kind === 'group' && accessDecision.allowed
-      ? await this.#startInteractionThread(channelId, text)
+    // Threads are now opt-in: only `/thread` opens one, every other command is
+    // answered in the channel where it was invoked.
+    const threadTarget = kind === 'group' && accessDecision.allowed
+      ? discordThreadRequest(text)
+      : null;
+    const threadId = threadTarget
+      ? await this.#startInteractionThread(channelId, text, threadTarget)
       : null;
     const replyTarget = { channelId: threadId ?? channelId };
     const client = this.#client;
@@ -1133,19 +1188,23 @@ export class DiscordRuntime {
       completed: false,
     };
     if (client?.attachInteraction) client.attachInteraction(replyTarget, binding);
-    if (threadId) {
-      // Point the invoker at the Thread up front, then let every reply land in
-      // it as an ordinary channel message. Marking the response complete keeps
-      // the deliveries out of the deferred placeholder.
+    if (threadTarget) {
+      // `/thread` is a pure control command: it opens the Thread, points the
+      // invoker at it, and never reaches the model. The user asks their real
+      // question inside the new Thread.
       binding.completed = true;
       await this.#api.editInteractionResponse({
         applicationId,
         interactionToken: token,
         body: {
-          content: t('已在新 Thread 中继续本次会话：{thread}', { thread: `<#${threadId}>` }),
+          content: threadId
+            ? t('已创建讨论串，请在讨论串中继续本次会话：{thread}', { thread: `<#${threadId}>` })
+            : t('无法创建 Thread，请在当前频道重新发送你的问题。'),
         },
         signal: this.#abortController?.signal,
       });
+      await this.#state.markSeen(messageId);
+      return;
     }
     const senderName = interaction.member?.nick
       ?? interaction.member?.user?.username
@@ -1180,12 +1239,13 @@ export class DiscordRuntime {
   }
 
   /**
-   * Mirror the text-command habit: a command invoked in a guild channel opens a
-   * Thread and the conversation continues there, so later messages need no
-   * mention and the Session is bound to the Thread. Returns the new Thread id,
-   * or null when the channel cannot host a Thread or creation failed.
+   * Opt-in Thread creation for `/thread`: the Thread becomes the home of the
+   * conversation, so later messages there need no mention and the Session is
+   * bound to it. The requested name wins; otherwise the command's own text is
+   * cleaned into a name. Returns the new Thread id, or null when the channel
+   * cannot host a Thread or creation failed.
    */
-  async #startInteractionThread(channelId, text) {
+  async #startInteractionThread(channelId, text, request) {
     const signal = this.#abortController?.signal;
     try {
       const cached = this.#channels.get(channelId);
@@ -1195,7 +1255,10 @@ export class DiscordRuntime {
       if (type !== GUILD_TEXT && type !== GUILD_ANNOUNCEMENT) return null;
       const thread = await this.#api.startThread({
         channelId,
-        name: cleanThreadName({ content: text, channel_id: channelId }, this.#config.platformId),
+        name: cleanThreadName(
+          { content: request?.name ?? text, channel_id: channelId },
+          this.#config.platformId,
+        ),
         signal,
       });
       this.#rememberChannel(thread);

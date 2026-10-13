@@ -6,7 +6,7 @@ import { WORKSPACE_SESSION_STALE } from './workspace-session.mjs';
 
 const WORKSPACE_COMMAND = /^\/(?:workspace|ws)(?:\s+([\s\S]+))?$/i;
 const WORKSPACE_LIST_COMMAND = /^\/(?:workspacelist|workspaces|wsl)(?:\s+([\s\S]+))?$/i;
-const THREAD_WORKSPACE_COMMAND = /^\/(?:conv|conversation|thread)(?:\s+([\s\S]+))?$/i;
+const THREAD_WORKSPACE_COMMAND = /^\/(?:conv|conversation)(?:\s+([\s\S]+))?$/i;
 const SESSION_LIST_COMMAND = /^\/(?:sessionlist|sessions)(?:\s+([\s\S]+))?$/i;
 const SESSION_BIND_PREFIX = /^\/session(?=$|\s)/i;
 const SESSION_BIND_COMMAND = /^\/session[ \t]+([^\s]+)$/i;

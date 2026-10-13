@@ -854,11 +854,11 @@ test('Discord preserves existing channel and thread addressing before native rou
   assert.equal(unmentionedThread.addressed, false);
 });
 
-test('Discord routes mentioned text and announcement messages into native threads', async () => {
+test('Discord routes /thread text and announcement messages into native threads', async () => {
   const botId = '1234567890123456789';
   for (const fixture of [
-    { parentType: 0, threadType: 11, content: 'build the report' },
-    { parentType: 5, threadType: 10, content: 'publish the report' },
+    { parentType: 0, threadType: 11, content: '/thread build the report' },
+    { parentType: 5, threadType: 10, content: '/thread publish the report' },
   ]) {
     const starts = [];
     const cached = [];
@@ -898,9 +898,10 @@ test('Discord routes mentioned text and announcement messages into native thread
     }, {
       channelId: message.channel_id,
       messageId: message.id,
-      name: fixture.content,
+      name: fixture.content.replace('/thread ', ''),
     });
     assert.equal(route.conversationId, message.id);
+    assert.equal(route.controlOnly, true, 'the command must not reach the model');
     assert.deepEqual(route.replyTarget, { channelId: message.id });
     assert.deepEqual(route.reactionTarget, {
       channelId: message.channel_id,
@@ -980,7 +981,7 @@ test('Discord recovers an already-created thread after an uncertain or duplicate
     guild_id: '444444444444444444',
     author: { id: '333333333333333333', bot: false },
     mentions: [{ id: botId }],
-    content: `<@${botId}> recover`,
+    content: `<@${botId}> /thread recover`,
   };
   let starts = 0;
   const route = await resolveDiscordMessageRoute(message, botId, {
@@ -1011,7 +1012,7 @@ test('Discord recovers an already-created thread after an uncertain or duplicate
   const foreignMessage = {
     ...message,
     id: '111111111111111151',
-    content: `<@${botId}> recover foreign thread`,
+    content: `<@${botId}> /thread recover foreign thread`,
   };
   const foreign = await resolveDiscordMessageRoute(foreignMessage, botId, {
     channel: { id: foreignMessage.channel_id, type: 0 },
@@ -1045,7 +1046,7 @@ test('Discord converges a post-dispatch abort but sends no create request after 
     guild_id: '444444444444444444',
     author: { id: '333333333333333333', bot: false },
     mentions: [{ id: botId }],
-    content: `<@${botId}> abort boundary`,
+    content: `<@${botId}> /thread abort boundary`,
   };
   const before = new AbortController();
   const beforeReason = new DOMException('cancelled before dispatch', 'AbortError');
@@ -1104,7 +1105,7 @@ test('Discord falls back before routing when the parent is unsupported or thread
     guild_id: '444444444444444444',
     author: { id: '333333333333333333', bot: false },
     mentions: [{ id: botId }],
-    content: `<@${botId}> fallback`,
+    content: `<@${botId}> /thread fallback`,
   };
 
   const unsupported = await resolveDiscordMessageRoute({
@@ -1122,7 +1123,7 @@ test('Discord falls back before routing when the parent is unsupported or thread
   assert.equal(unsupported.conversationRoute.fallback, 'unsupported-channel');
   assert.equal(
     unsupported.replyTarget.notice,
-    '当前频道不支持自动创建 Thread，已直接在当前频道回复。',
+    '当前频道不支持创建 Thread，已直接在当前频道回复。',
   );
 
   const rejected = await resolveDiscordMessageRoute({
@@ -1159,7 +1160,7 @@ test('Discord never runs a parent-channel fallback when thread creation remains 
     guild_id: '444444444444444444',
     author: { id: '333333333333333333', bot: false },
     mentions: [{ id: botId }],
-    content: `<@${botId}> uncertain`,
+    content: `<@${botId}> /thread uncertain`,
   };
   await assert.rejects(() => resolveDiscordMessageRoute(message, botId, {
     channel: { id: message.channel_id, type: 0 },
@@ -1258,7 +1259,7 @@ test('Discord keeps streamed text and result files on the final created Thread t
     guild_id: '444444444444444444',
     author: { id: '333333333333333333', bot: false },
     mentions: [{ id: botId }],
-    content: `<@${botId}> deliver in thread`,
+    content: `<@${botId}> /thread deliver in thread`,
   };
   const operations = [];
   const api = {
@@ -1302,12 +1303,19 @@ test('Discord keeps streamed text and result files on the final created Thread t
     bytes: Buffer.from('thread result'),
   });
 
+  // The route itself now posts the "Thread created" notice to the source
+  // channel, before the client's own delivery operations.
   assert.deepEqual(operations.map(({ operation }) => operation), [
-    'typing', 'create', 'edit', 'file',
+    'create', 'typing', 'create', 'edit', 'file',
   ]);
-  assert.equal(operations.every(({ channelId }) => channelId === message.id), true);
-  assert.equal(operations.some(({ channelId }) => channelId === message.channel_id), false);
-  assert.equal(operations.find(({ operation }) => operation === 'create').replyToMessageId, undefined);
+  const [notice, ...deliveries] = operations;
+  assert.equal(notice.channelId, message.channel_id);
+  assert.equal(notice.replyToMessageId, message.id);
+  assert.match(notice.content, /已创建讨论串/);
+  // Everything the model produces still lands in the Thread, never the parent.
+  assert.equal(deliveries.every(({ channelId }) => channelId === message.id), true);
+  const threadCreate = deliveries.find(({ operation }) => operation === 'create');
+  assert.equal(threadCreate.replyToMessageId, undefined);
   assert.equal(operations.find(({ operation }) => operation === 'file').replyToMessageId, undefined);
 });
 
@@ -1527,19 +1535,28 @@ test('Discord runtime keeps one isolated Session per managed thread and reuses i
     guild_id: '444444444444444444',
     author: { id: '333333333333333330', bot: false },
     mentions: [{ id: botId }],
-    content: `<@${botId}> first task`,
+    content: `<@${botId}> /thread first task`,
   };
   const firstPacket = JSON.stringify({ op: 0, t: 'MESSAGE_CREATE', s: 3, d: firstMessage });
   socket.emit('message', { data: firstPacket });
   socket.emit('message', { data: firstPacket });
-  await eventually(() => runtime.status.messagesReplied === 1);
+  // `/thread` produces no model reply, so completion is signalled by the message
+  // being marked seen (which also suppresses the replayed duplicate).
+  await eventually(() => seen.has(firstMessage.id)
+    && deliveries.some((entry) => entry.operation === 'create'
+      && entry.channelId === parentChannelId));
 
   assert.equal(starts.length, 1);
   assert.equal(sessions.has(`group:${parentChannelId}`), false);
-  assert.equal(sessions.get(`group:${firstMessage.id}`), 'session-1');
-  assert.deepEqual(asks, [{ sessionId: 'session-1', text: 'first task', files: 0 }]);
-  assert.equal(deliveries.every((entry) => entry.channelId === firstMessage.id), true);
-  assert.equal(deliveries.find((entry) => entry.operation === 'create').replyToMessageId, undefined);
+  // `/thread` is a pure control command: it opens the Thread, binds the Session
+  // to it, and is never forwarded to the model.
+  assert.deepEqual(asks, []);
+  assert.equal(deliveries.some((entry) => entry.operation === 'create'
+    && entry.channelId === parentChannelId
+    && entry.replyToMessageId === firstMessage.id
+    && /已创建讨论串/.test(entry.content)
+    && entry.content.includes(firstMessage.id)), true);
+  assert.equal(deliveries.every((entry) => entry.channelId === firstMessage.id), false);
 
   socket.emit('message', {
     data: JSON.stringify({
@@ -1563,8 +1580,13 @@ test('Discord runtime keeps one isolated Session per managed thread and reuses i
       },
     }),
   });
-  await eventually(() => runtime.status.messagesReplied === 2);
-  assert.deepEqual(asks[1], { sessionId: 'session-1', text: 'continue task', files: 1 });
+  // The first message that actually reaches the model is the one posted inside
+  // the Thread, which is what binds the Session to it.
+  await eventually(() => runtime.status.messagesReplied === 1);
+  assert.equal(sessions.get(`group:${firstMessage.id}`), 'session-1');
+  assert.deepEqual(asks, [{ sessionId: 'session-1', text: 'continue task', files: 1 }]);
+  assert.equal(deliveries.every((entry) => entry.channelId === firstMessage.id
+    || entry.channelId === parentChannelId), true);
 
   const statusMessageId = '111111111111111179';
   socket.emit('message', {
@@ -1583,7 +1605,7 @@ test('Discord runtime keeps one isolated Session per managed thread and reuses i
     }),
   });
   await eventually(() => seen.has(statusMessageId));
-  assert.equal(asks.length, 2);
+  assert.equal(asks.length, 1);
   assert.equal(deliveries.some((entry) => entry.operation === 'create'
     && entry.channelId === firstMessage.id
     && entry.replyToMessageId === statusMessageId
@@ -1606,7 +1628,7 @@ test('Discord runtime keeps one isolated Session per managed thread and reuses i
   });
   await eventually(() => seen.has('111111111111111172'));
   assert.equal(runtime.status.messagesRejected, 1);
-  assert.equal(asks.length, 2);
+  assert.equal(asks.length, 1);
 
   socket.emit('message', {
     data: JSON.stringify({
@@ -1623,9 +1645,9 @@ test('Discord runtime keeps one isolated Session per managed thread and reuses i
       },
     }),
   });
-  await eventually(() => runtime.status.messagesReplied === 3);
+  await eventually(() => runtime.status.messagesReplied === 2);
   assert.equal(sessions.get(`group:${unrelatedThreadId}`), 'session-2');
-  assert.deepEqual(asks[2], { sessionId: 'session-2', text: 'explicit thread task', files: 0 });
+  assert.deepEqual(asks[1], { sessionId: 'session-2', text: 'explicit thread task', files: 0 });
 
   for (const [index, senderId] of ['333333333333333332', '333333333333333333'].entries()) {
     socket.emit('message', {
@@ -1639,18 +1661,54 @@ test('Discord runtime keeps one isolated Session per managed thread and reuses i
           guild_id: '444444444444444444',
           author: { id: senderId, bot: false },
           mentions: [{ id: botId }],
-          content: `<@${botId}> user ${index}`,
+          content: `<@${botId}> /thread user ${index}`,
         },
       }),
     });
   }
-  await eventually(() => runtime.status.messagesReplied === 5);
-  assert.equal(starts.length, 3);
+  await eventually(() => starts.length === 3);
+  // Both `/thread user N` commands only opened Threads; neither reached the model,
+  // so no Session exists yet.
+  assert.equal(asks.length, 2);
+  assert.equal(sessions.has('group:111111111111111180'), false);
+  assert.equal(sessions.has('group:111111111111111181'), false);
+  assert.equal(sessions.has(`group:${parentChannelId}`), false);
+  // Both notices are delivered once the routes finish caching their new Threads.
+  // `/thread` is a pure control command: it answers in the source channel and
+  // opens the Thread, but never reaches the model.
+  await eventually(() => starts.length === 3
+    && deliveries.filter((entry) => entry.operation === 'create'
+      && entry.channelId === parentChannelId).length === 3);
+
+  // A message inside each new Thread binds its own Session and needs no mention.
+  for (const [index, threadId] of ['111111111111111180', '111111111111111181'].entries()) {
+    socket.emit('message', {
+      data: JSON.stringify({
+        op: 0,
+        t: 'MESSAGE_CREATE',
+        s: 10 + index,
+        d: {
+          id: `11111111111111119${index}`,
+          channel_id: threadId,
+          guild_id: '444444444444444444',
+          author: { id: '333333333333333333', bot: false },
+          mentions: [],
+          content: `task ${index}`,
+        },
+      }),
+    });
+  }
+  await eventually(() => sessions.has('group:111111111111111180')
+    && sessions.has('group:111111111111111181'));
+  assert.deepEqual(asks.slice(-2), [
+    { sessionId: 'session-3', text: 'task 0', files: 0 },
+    { sessionId: 'session-4', text: 'task 1', files: 0 },
+  ]);
   assert.notEqual(
     sessions.get('group:111111111111111180'),
     sessions.get('group:111111111111111181'),
+    'each managed Thread gets its own Session',
   );
-  assert.equal(sessions.has(`group:${parentChannelId}`), false);
   await runtime.stop();
 
   runtime = createRuntime();
@@ -1688,7 +1746,7 @@ test('Discord runtime keeps one isolated Session per managed thread and reuses i
     }),
   });
   await eventually(() => runtime.status.messagesReplied === 1);
-  assert.deepEqual(asks[5], {
+  assert.deepEqual(asks.at(-1), {
     sessionId: 'session-1',
     text: 'continue after restart',
     files: 0,
@@ -1808,43 +1866,61 @@ test('Discord captures context settings before asynchronous Thread routing and u
   assert.equal(threadStarts, 0, 'a command-denied member must not create a Discord Thread');
   assert.equal(deliveries.at(-1)?.channelId, parentId);
   assert.equal(deliveries.at(-1)?.content, COMMAND_PERMISSION_DENIED_MESSAGE);
+  // `/thread first` opens the Thread asynchronously; it is a pure control
+  // command, so the configuration read at its arrival is the one its route uses.
   socket.emit('message', { data: JSON.stringify({ op: 0, t: 'MESSAGE_CREATE', s: 3, d: {
     id: threadId, channel_id: parentId, guild_id: '444444444444444444',
     author: { id: '333333333333333333', bot: false, global_name: 'Global Name', username: 'username' },
-    member: { nick: 'Group Nick' }, mentions: [{ id: botId }], content: `<@${botId}> first`,
+    member: { nick: 'Group Nick' }, mentions: [{ id: botId }], content: `<@${botId}> /thread first`,
   } }) });
   await routingStarted.promise;
   assert.equal(threadStarts, 1);
-  config = { ...config, group: { ...config.group, enabled: false } };
+  releaseRouting.resolve();
+  // `/thread` is a pure control command: it opens the Thread and answers in the
+  // source channel, but nothing reaches the model.
+  await eventually(() => seen.has(threadId));
+  assert.equal(prompts.length, 0);
+
+  // `/thread` is a control command, so it never carries the Prompt: the first
+  // message inside the new Thread does. Because that message is enhanced with
+  // the configuration accepted on arrival, swapping the live settings out while
+  // its routing is still in flight must not change what it was enhanced with.
   accessSettings = {
     ...allowedAccessSettings,
     group: {
       ...allowedAccessSettings.group,
-      allowlist: { users: [] },
+      allowlist: { users: [{ id: '333333333333333333', canExecuteCommands: true }] },
     },
   };
-  releaseRouting.resolve();
+  socket.emit('message', { data: JSON.stringify({ op: 0, t: 'MESSAGE_CREATE', s: 4, d: {
+    id: '111111111111111192', channel_id: threadId, guild_id: '444444444444444444',
+    author: { id: '333333333333333333', bot: false, global_name: 'Global Name', username: 'username' },
+    member: { nick: 'Group Nick' }, content: 'first',
+  } }) });
   await eventually(() => runtime.status.messagesReplied === 1);
   assert.match(prompts[0], /accepted before routing/);
   assert.deepEqual(JSON.parse(/^<dsh_im_source>(.*?)<\/dsh_im_source>/su.exec(prompts[0])[1]), {
     channel: 'discord', conversationType: 'group', senderId: '333333333333333333',
     senderName: 'Group Nick', botId: 'discord_internal',
   });
-  assert.equal(reads, 1, 'routing and Bridge share one accepted configuration read');
-  assert.equal(accessReads, 3,
+  assert.equal(reads, 2,
+    '`/thread` and the Prompt inside it each read the accepted configuration once');
+  assert.equal(accessReads, 4,
     'each source event reads access once and the Thread keeps its arrival decision');
 
+  // With group enhancement turned off, the next event is sent verbatim, but it
+  // still reads the live policy once on arrival.
+  config = { ...config, group: { ...config.group, enabled: false } };
   accessSettings = allowedAccessSettings;
-  socket.emit('message', { data: JSON.stringify({ op: 0, t: 'MESSAGE_CREATE', s: 4, d: {
+  socket.emit('message', { data: JSON.stringify({ op: 0, t: 'MESSAGE_CREATE', s: 5, d: {
     id: '111111111111111191', channel_id: threadId, guild_id: '444444444444444444',
     author: { id: '333333333333333333', bot: false }, content: 'second without enhancement',
   } }) });
   await eventually(() => runtime.status.messagesReplied === 2);
   assert.equal(prompts[1], 'second without enhancement');
-  assert.equal(reads, 2);
-  assert.equal(accessReads, 4, 'the next managed-Thread event reads the latest policy once');
+  assert.equal(reads, 3);
+  assert.equal(accessReads, 5, 'the next managed-Thread event reads the latest policy once');
 });
-
 test('Discord runtime records one uncertain Thread result and suppresses Gateway replays', async () => {
   const botId = '1234567890123456789';
   const parentChannelId = '222222222222222290';
@@ -1917,7 +1993,7 @@ test('Discord runtime records one uncertain Thread result and suppresses Gateway
       guild_id: '444444444444444444',
       author: { id: '333333333333333333', bot: false },
       mentions: [{ id: botId }],
-      content: `<@${botId}> uncertain task`,
+      content: `<@${botId}> /thread uncertain task`,
     },
   };
   socket.emit('message', { data: JSON.stringify(packet) });
