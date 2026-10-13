@@ -22,4 +22,13 @@ export default {
     '/thread [name]  Create a Thread in the current channel (auto-named when omitted)',
   '创建后本指令不再回复，请在讨论串中重新发送你的问题':
     'This command sends no reply of its own - resend your question inside the Thread',
+  '关闭讨论串并结束当前会话': 'Close a Thread and end the current session',
+  '/close  删除当前讨论串并结束会话绑定（仅 Discord）':
+    '/close  Delete the current Thread and release the session binding (Discord only)',
+  '在普通频道中执行时只结束会话绑定，不会删除频道':
+    'Run in a normal channel it only ends the session binding; the channel is left alone',
+  '当前不在讨论串中，已结束本次会话。请发送新消息重新开始。':
+    'This is not a Thread, so the session was ended. Send a new message to start again.',
+  '已结束本次会话。请发送新消息重新开始。':
+    'The session was ended. Send a new message to start again.',
 };

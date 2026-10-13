@@ -218,6 +218,18 @@ export class DiscordApi {
     );
   }
 
+  // Deleting a Thread removes it for everyone. Only threads may be closed this
+  // way: a guild text channel needs MANAGE_CHANNELS and would destroy history,
+  // so callers must check `isThreadChannel` first.
+  deleteChannel({ channelId, signal } = {}) {
+    return this.#request(`channels/${snowflake(channelId, 'channel id')}`, {
+      method: 'DELETE',
+      signal,
+      expectBody: false,
+      retry: false,
+    });
+  }
+
   // Start Thread without Message. A native application command has no source
   // message, so `startThreadFromMessage` is not usable for that path.
   startThread({ channelId, name, type = PUBLIC_THREAD, signal } = {}) {

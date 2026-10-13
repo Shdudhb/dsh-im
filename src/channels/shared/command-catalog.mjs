@@ -47,6 +47,10 @@ export const SHARED_COMMAND_CATALOG = Object.freeze([
     '/thread [名称]  在当前频道创建一个讨论串（未填名称时自动命名）',
     '创建后本指令不再回复，请在讨论串中重新发送你的问题',
   ], { channels: ['discord'] }),
+  defineCatalogCommand('close', '关闭讨论串并结束当前会话', [
+    '/close  删除当前讨论串并结束会话绑定（仅 Discord）',
+    '在普通频道中执行时只结束会话绑定，不会删除频道',
+  ], { channels: ['discord'] }),
   defineCatalogCommand('workspacelist', '列出工作区绝对路径', [
     '/workspacelist  列出工作区绝对路径',
     '/ws、/wsl、/workspaces  工作区命令别名',

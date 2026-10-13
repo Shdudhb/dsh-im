@@ -125,7 +125,7 @@ function runtimeFor(t, {
   partialApi = false,
   logger = { warn() {}, error(...args) { assert.fail(args.join(' ')); } },
 } = {}) {
-  const calls = { list: [], set: [], ack: [], edit: [], created: [], cleared: [], threads: [] };
+  const calls = { list: [], set: [], ack: [], edit: [], created: [], cleared: [], threads: [], deleted: [] };
   const asks = [];
   let socket;
   const api = {
@@ -141,6 +141,10 @@ function runtimeFor(t, {
     createMessage: async (request) => {
       calls.created.push(request);
       return { id: `8888888888888888${String(calls.created.length).padStart(2, '0')}` };
+    },
+    deleteChannel: async (request) => {
+      calls.deleted.push(request);
+      return null;
     },
     editMessage: async ({ messageId }) => ({ id: messageId }),
   };
@@ -194,13 +198,14 @@ function interactionPayload({
   type = 2,
   guildId = GUILD_ID,
   userId = USER_ID,
+  channelId = PARENT_ID,
 } = {}) {
   return {
     id,
     application_id: BOT_ID,
     type,
     token: INTERACTION_TOKEN,
-    channel_id: PARENT_ID,
+    channel_id: channelId,
     ...(guildId ? { guild_id: guildId } : {}),
     ...(userId ? {
       member: { user: { id: userId, username: 'tester' }, nick: 'Tester' },
@@ -468,8 +473,51 @@ test('Discord opens a Thread for /thread and never forwards the command to the m
   assert.equal(runtime.status.ready, true);
 });
 
-test('Discord answers a direct-message command in place without a Thread', async (t) => {
+test('Discord closes a Thread for /close and releases the session binding', async (t) => {
+  const { runtime, calls, socket, api } = runtimeFor(t);
+  // `/close` runs inside the Thread, and the API reports it as a Thread.
+  api.getChannel = async ({ channelId }) => ({
+    id: channelId, type: 11, parent_id: PARENT_ID, owner_id: BOT_ID,
+  });
+  await runtime.start();
+  socket().emit('message', {
+    data: JSON.stringify({
+      op: 0,
+      t: 'GUILD_CREATE',
+      s: 2,
+      d: {
+        id: GUILD_ID,
+        channels: [{ id: PARENT_ID, type: 0 }],
+        threads: [{ id: THREAD_ID, type: 11, parent_id: PARENT_ID, owner_id: BOT_ID }],
+      },
+    }),
+  });
+  emitInteraction(socket(), interactionPayload({ name: 'close', channelId: THREAD_ID }));
+  await eventually(() => calls.deleted.length === 1);
+  assert.equal(calls.deleted[0].channelId, THREAD_ID);
+  // The Thread is gone: no reply can land there and no new Thread is opened.
+  assert.deepEqual(calls.created, [], 'no reply can be posted after the Thread is deleted');
+  assert.deepEqual(calls.threads, [], '/close must not open a new Thread');
+});
+
+test('Discord never deletes a normal channel for /close', async (t) => {
   const { runtime, calls, socket } = runtimeFor(t);
+  await runtime.start();
+  socket().emit('message', {
+    data: JSON.stringify({
+      op: 0,
+      t: 'GUILD_CREATE',
+      s: 2,
+      d: { id: GUILD_ID, channels: [{ id: PARENT_ID, type: 0 }], threads: [] },
+    }),
+  });
+  emitInteraction(socket(), interactionPayload({ name: 'close' }));
+  await eventually(() => calls.edit.length === 1);
+  assert.deepEqual(calls.deleted, [], 'a guild text channel must never be deleted');
+  assert.match(calls.edit[0].body.content, /not a Thread|不在讨论串/u);
+});
+
+test('Discord answers a direct-message command in place without a Thread', async (t) => {  const { runtime, calls, socket } = runtimeFor(t);
   await runtime.start();
   emitInteraction(socket(), interactionPayload({ name: 'version', guildId: null }));
   await eventually(() => calls.edit.length === 1);

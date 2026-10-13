@@ -762,6 +762,22 @@ export class TextHarnessBridge {
         await this.#bot.sendText(target, t('已开启新会话。请发送你的问题。'));
         return;
       }
+      if (!hasImages && !hasFiles && command === '/close') {
+        // `/close` deletes the Thread when there is one and always releases the
+        // Session binding, so the next message starts fresh. Deleting the Thread
+        // removes the channel we would have replied in, so nothing is sent there.
+        const canClose = typeof this.#bot.closeThread === 'function';
+        const closed = canClose ? await this.#bot.closeThread(target) : false;
+        await this.#state.clearSession(conversationKey);
+        if (closed) return;
+        await this.#bot.sendText(
+          target,
+          canClose
+            ? t('当前不在讨论串中，已结束本次会话。请发送新消息重新开始。')
+            : t('已结束本次会话。请发送新消息重新开始。'),
+        );
+        return;
+      }
       const compactCommand = !hasImages && !hasFiles
         ? await runCompactCommand(
             text,

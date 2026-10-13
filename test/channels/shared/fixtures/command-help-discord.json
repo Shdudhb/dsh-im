@@ -1,10 +1,14 @@
 {
   "zh": [
     "/thread [名称]  在当前频道创建一个讨论串（未填名称时自动命名）",
-    "创建后本指令不再回复，请在讨论串中重新发送你的问题"
+    "创建后本指令不再回复，请在讨论串中重新发送你的问题",
+    "/close  删除当前讨论串并结束会话绑定（仅 Discord）",
+    "在普通频道中执行时只结束会话绑定，不会删除频道"
   ],
   "en": [
     "/thread [name]  Create a Thread in the current channel (auto-named when omitted)",
-    "This command sends no reply of its own - resend your question inside the Thread"
+    "This command sends no reply of its own - resend your question inside the Thread",
+    "/close  Delete the current Thread and release the session binding (Discord only)",
+    "Run in a normal channel it only ends the session binding; the channel is left alone"
   ]
 }

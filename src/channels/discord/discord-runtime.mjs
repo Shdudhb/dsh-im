@@ -531,6 +531,22 @@ export class DiscordBotClient {
     return this.#api.sendTyping({ channelId: target.channelId, signal: this.#signal });
   }
 
+  /**
+   * Delete the Thread a conversation is running in, so it disappears for
+   * everyone instead of merely being archived. Only Threads can be closed this
+   * way; a guild text channel is never deleted. Returns false when the target is
+   * not a Thread, so the caller can report that instead of silently doing
+   * nothing.
+   */
+  async closeThread(target) {
+    const channelId = String(target?.channelId ?? '');
+    if (!channelId) return false;
+    const channel = await this.#api.getChannel({ channelId, signal: this.#signal });
+    if (!isThreadChannel(channel)) return false;
+    await this.#api.deleteChannel({ channelId, signal: this.#signal });
+    return true;
+  }
+
   sendFile(target, file) {
     return this.#api.createFileMessage({
       channelId: target.channelId,
